@@ -1,17 +1,266 @@
 # Nginx Log Analyzer
 
-Анализатор на Nginx `access` и `error` логови. Покажува **која IP каде одела и што правела**, плус детални грешки по страна, патека и upstream апликација.
+**[Македонски](#македонски)** · **[English](#english)**
 
-Работи само со Python стандардна библиотека. Ги чита тековните логови и ротираните `.gz` датотеки.
+Анализатор на Nginx `access` и `error` логови. Покажува која IP каде одела и што правела, плус детални грешки по страна и апликација.
+
+Nginx access/error log analyzer. Shows which IP went where and what it did, plus a detailed error breakdown per site and upstream app.
 
 ---
 
-Parse Nginx access/error logs (including rotated `.gz` files) and produce a terminal + HTML report:
+# Македонски
+
+Анализатор на Nginx `access` и `error` логови. Покажува **која IP каде одела и што правела**, плус детални грешки по страна, патека и upstream апликација.
+
+Работи само со Python стандардна библиотека. Ги чита тековните логови и ротираните `.gz` датотеки. Извештаите се на македонски.
+
+## Можности
+
+- Парсер за `combined` access формат, со пофлексибилен fallback
+- Парсер за error лог што вади `client`, `server`, `request`, `host`, `upstream`
+- По IP: прво/последно барање, бајти, методи, статуси, патеки
+- Сообраќај по ден, најбарани патеки, распределба на статус кодови
+- Ознака за типични скенери / експлойти (`.env`, `wp-login.php`, `.git`, phpMyAdmin, …)
+- Текстуален извештај за терминал и самостоен HTML извештај
+- Дневна автоматизација преку cron или systemd timer
+- Опционална `logs` команда за zsh
+
+## Барања
+
+- Python 3.8+
+- Без дополнителни пакети
+- Право на читање на `/var/log/nginx/` (обично `sudo`, или група `adm`)
+
+Очекуван access формат (nginx `combined`):
+
+```
+$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"
+```
+
+## Структура на проектот
+
+```
+.
+├── nginx_log_analyzer.py    # главен анализатор
+├── nginx-daily-report.sh    # дневен wrapper (датирани извештаи + чистење)
+├── nginx-report.service     # systemd oneshot
+├── nginx-report.timer       # секој ден во 00:20
+├── nginx-logs.zsh           # zsh помошник: logs, logs f, logs report
+├── LICENSE
+└── README.md
+```
+
+## Инсталација
+
+```bash
+sudo cp nginx_log_analyzer.py /usr/local/bin/nginx_log_analyzer.py
+sudo cp nginx-daily-report.sh /usr/local/bin/nginx-daily-report.sh
+sudo chmod 755 /usr/local/bin/nginx_log_analyzer.py /usr/local/bin/nginx-daily-report.sh
+sudo mkdir -p /var/log/nginx-reports
+```
+
+Брза проверка:
+
+```bash
+sudo python3 /usr/local/bin/nginx_log_analyzer.py --current-only
+```
+
+## Употреба
+
+```bash
+# полн извештај во терминал (тековни + ротирани + .gz)
+sudo python3 nginx_log_analyzer.py
+
+# само денешните access.log / error.log
+sudo python3 nginx_log_analyzer.py --current-only
+
+# топ 50 IP, повеќе патеки по IP, зачувај датотеки
+sudo python3 nginx_log_analyzer.py -n 50 -p 40 \
+  -o /tmp/nginx-report.txt \
+  --html /tmp/nginx-report.html
+
+# само грешки
+sudo python3 nginx_log_analyzer.py --error-only
+
+# најнови 2 датотеки по тип (access.log + access.log.1, …)
+sudo python3 nginx_log_analyzer.py --max-files 2
+```
+
+### CLI опции
+
+| Опција | Стандардно | Опис |
+|---|---|---|
+| `-d`, `--dir` | `/var/log/nginx` | Директориум со логови |
+| `-n`, `--top-ips` | `30` | Колку IP да се прикажат детално |
+| `-p`, `--paths-per-ip` | `20` | Колку патеки по IP |
+| `--access-only` | | Без error логови |
+| `--error-only` | | Без access логови |
+| `--current-only` | | Само `access.log` и `error.log` |
+| `--max-files N` | `0` (сите) | Ограничи датотеки по тип, најнови прво |
+| `-o`, `--output` | stdout | Зачувај текстуален извештај |
+| `--html PATH` | | Зачувај HTML извештај |
+| `-q`, `--quiet` | | Без прогрес (за cron) |
+
+HTML датотеката отвори ја во прелистувач. Текстуалниот извештај е UTF-8 и е за терминал / `less`.
+
+## zsh помошник (`logs`)
+
+Ако користиш zsh, вчитај го помошникот од `~/.zshrc`:
+
+```bash
+sudo cp nginx-logs.zsh /usr/local/bin/nginx-logs.zsh
+```
+
+```zsh
+# ~/.zshrc
+source /usr/local/bin/nginx-logs.zsh
+# ако анализаторот не е во /usr/local/bin:
+# export NGINX_ANALYZER="$HOME/src/nginx-log-analyzer/nginx_log_analyzer.py"
+```
+
+Превчитај:
+
+```bash
+source ~/.zshrc
+```
+
+| Команда | Што прави |
+|---|---|
+| `logs` | Го отвора `access.log` во `less` (скока на крај) |
+| `logs e` | `error.log` |
+| `logs f` | Live follow на access + error (`tail -F`) |
+| `logs fa` / `logs fe` | Live само access или само error |
+| `logs today` | Анализа само на тековните логови |
+| `logs report` | Полна анализа, низ `less` |
+| `logs last` | Последниот зачуван дневен извештај |
+| `logs grep wp-login` | Пребарување низ access логови |
+| `logs help` | Листа на команди |
+
+Функцијата сама повикува `sudo` кога датотеките не се читливи за тековниот корисник.
+
+Во `less`: `q` излез, `/текст` пребарување, `G` крај, `g` почеток.
+
+## Автоматски дневни извештаи
+
+Извештаите се запишуваат во `/var/log/nginx-reports/`:
+
+- `nginx-report-YYYY-MM-DD.txt`
+- `nginx-report-YYYY-MM-DD.html`
+- симболички линкови `latest.txt` / `latest.html`
+- датотеки постари од 30 дена се бришат (`KEEP_DAYS`)
+
+Пушти еднаш после logrotate (кај Nginx ротацијата често е околу 00:10):
+
+```bash
+sudo /usr/local/bin/nginx-daily-report.sh
+```
+
+### cron
+
+```bash
+sudo crontab -e
+```
+
+```cron
+20 0 * * * /usr/local/bin/nginx-daily-report.sh >/var/log/nginx-reports/cron.log 2>&1
+```
+
+Испрати го текстуалниот извештај на е-пошта (треба `mail`/`mailx` и локален MTA):
+
+```cron
+20 0 * * * MAIL_TO=admin@example.com /usr/local/bin/nginx-daily-report.sh
+```
+
+### systemd timer
+
+```bash
+sudo cp nginx-report.service nginx-report.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nginx-report.timer
+systemctl list-timers | grep nginx
+```
+
+Тајмерот се пали секој ден во **00:20**. `Persistent=true` ќе ја изврши пропуштената задача после рестарт.
+
+```bash
+sudo systemctl start nginx-report.service
+journalctl -u nginx-report.service -n 30
+```
+
+За е-пошта, откоментирај во service датотеката:
+
+```ini
+Environment=MAIL_TO=admin@example.com
+```
+
+### logrotate hook
+
+Наместо cron/timer, извештајот може да се генерира веднаш после ротација. Во `/etc/logrotate.d/nginx`:
+
+```
+postrotate
+    /usr/local/bin/nginx-daily-report.sh
+endscript
+```
+
+Избери **или** cron/systemd **или** logrotate hook, не обајцата во иста минута.
+
+## Што содржи извештајот
+
+**Access**
+
+- број на барања, уникатни IP и патеки
+- сообраќај по ден
+- методи и статус кодови
+- најбарани патеки и User-Agent
+- за секоја топ IP: посетени патеки, методи, статуси, бајти, прво/последно, User-Agent, referer
+- локалните/LAN IP се означени
+- примерок од сомнителни барања
+
+**Error**
+
+- број по ниво (`error`, `warn`, `crit`, …)
+- грешки по `host` / `server_name` (виртуелен хост / страна)
+- грешки по патека
+- грешки по `upstream` (backend апликацијата зад Nginx)
+- грешки по клиентска IP
+- групирани/нормализирани пораки
+- сурови примероци
+
+Празен `error.log` е нормален веднаш после ротација. Постарите `error.log.1` и `error.log.N.gz` сепак се читаат, освен ако не дадеш `--current-only`.
+
+## Дозволи
+
+Типичен Debian/Ubuntu распоред:
+
+```
+-rw-r-----  www-data adm  /var/log/nginx/access.log
+```
+
+Пушти го анализаторот како root, или додај се во групата `adm`:
+
+```bash
+sudo usermod -aG adm "$USER"
+```
+
+Потоа одјави се и најави се повторно.
+
+## Лиценца
+
+MIT — користи, форкни, менувај.
+
+---
+
+# English
+
+Parse Nginx `access` and `error` logs and produce a terminal + HTML report:
 
 - which IP visited which paths
 - HTTP methods, status codes, user-agents, referrers
 - suspicious scanner / exploit probes
 - error-log breakdown by host, URI, and upstream backend
+
+Uses the Python standard library only. Reads live logs and rotated `.gz` files. Report text is in Macedonian.
 
 ## Features
 
@@ -44,7 +293,8 @@ $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$
 ├── nginx-daily-report.sh    # daily wrapper (dated reports + cleanup)
 ├── nginx-report.service     # systemd oneshot
 ├── nginx-report.timer       # run every day at 00:20
-├── nginx-logs.zsh           # zsh helper: `logs`, `logs f`, `logs report`
+├── nginx-logs.zsh           # zsh helper: logs, logs f, logs report
+├── LICENSE
 └── README.md
 ```
 
@@ -135,6 +385,8 @@ source ~/.zshrc
 | `logs help` | Command list |
 
 The function calls `sudo` automatically when the files are not readable by your user.
+
+In `less`: `q` quit, `/text` search, `G` end, `g` start.
 
 ## Automate daily reports
 
