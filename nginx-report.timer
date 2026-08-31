@@ -1,0 +1,10 @@
+[Unit]
+Description=Активирај Nginx извештај секој ден во 00:20
+
+[Timer]
+OnCalendar=*-*-* 00:20:00
+Persistent=true
+RandomizedDelaySec=3m
+
+[Install]
+WantedBy=timers.target

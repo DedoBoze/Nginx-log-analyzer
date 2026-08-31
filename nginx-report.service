@@ -1,0 +1,15 @@
+[Unit]
+Description=Дневен Nginx log извештај
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=ANALYZER=/usr/local/bin/nginx_log_analyzer.py
+Environment=REPORT_DIR=/var/log/nginx-reports
+Environment=KEEP_DAYS=30
+# Environment=MAIL_TO=admin@example.com
+ExecStart=/usr/local/bin/nginx-daily-report.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
