@@ -9,7 +9,18 @@ nginx-logs-need-sudo() {
 }
 
 logs() {
-  local logdir="${NGINX_LOG_DIR:-/var/log/nginx}"
+  local logdir="${NGINX_LOG_DIR:-}"
+  if [[ -z "$logdir" ]]; then
+    local d
+    for d in /var/log/nginx /usr/local/nginx/logs /opt/nginx/logs \
+             /usr/local/openresty/nginx/logs /var/log/openresty; do
+      if [[ -d "$d" ]]; then
+        logdir="$d"
+        break
+      fi
+    done
+    logdir="${logdir:-/var/log/nginx}"
+  fi
   local analyzer="${NGINX_ANALYZER:-/usr/local/bin/nginx_log_analyzer.py}"
   local pager="${PAGER:-less}"
   local sudo_cmd=()

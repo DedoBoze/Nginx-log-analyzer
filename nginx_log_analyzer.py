@@ -27,6 +27,16 @@ DEFAULT_LOG_DIR = "/var/log/nginx"
 DEFAULT_TOP_IPS = 30
 DEFAULT_PATHS_PER_IP = 20
 
+# Чести локации по дистрибуција / начин на инсталација
+LOG_DIR_CANDIDATES = [
+    "/var/log/nginx",                 # Debian, Ubuntu, Fedora, RHEL, Arch, SUSE, Alpine
+    "/usr/local/nginx/logs",          # инсталација од source
+    "/opt/nginx/logs",
+    "/usr/local/openresty/nginx/logs",
+    "/var/log/openresty",
+    "/usr/local/etc/nginx/logs",
+]
+
 # Combined / common access log
 # 1.2.3.4 - - [31/Aug/2026:00:32:10 +0200] "GET /path HTTP/1.1" 200 1234 "ref" "ua"
 ACCESS_RE = re.compile(
@@ -140,6 +150,44 @@ def is_private_ip(ip: str) -> bool:
     return False
 
 
+def resolve_log_dir(requested: str) -> Path:
+    """Најди директориум со логови. Ако бараната патека постои, користи ја.
+    Инаку пробај чести патеки на различни дистрибуции."""
+    req = Path(requested)
+    if req.is_dir():
+        return req
+
+    for candidate in LOG_DIR_CANDIDATES:
+        p = Path(candidate)
+        if p.is_dir() and any(p.iterdir()):
+            return p
+
+    searched = [str(req)] + [c for c in LOG_DIR_CANDIDATES if c != str(req)]
+    raise FileNotFoundError(
+        "Не е најден директориум со Nginx логови. Пробано:\n  - "
+        + "\n  - ".join(searched)
+        + "\nЗадај експлицитно: --dir /патека/до/логови"
+    )
+
+
+def _is_access_log(name: str) -> bool:
+    return (
+        name.startswith("access.log")
+        or name.startswith("access_log")
+        or name.startswith("nginx-access.log")
+        or name.startswith("nginx_access.log")
+    )
+
+
+def _is_error_log(name: str) -> bool:
+    return (
+        name.startswith("error.log")
+        or name.startswith("error_log")
+        or name.startswith("nginx-error.log")
+        or name.startswith("nginx_error.log")
+    )
+
+
 def discover_logs(log_dir: Path) -> tuple[List[Path], List[Path]]:
     access, error = [], []
     if not log_dir.is_dir():
@@ -147,23 +195,35 @@ def discover_logs(log_dir: Path) -> tuple[List[Path], List[Path]]:
 
     for p in sorted(log_dir.iterdir(), key=lambda x: x.name):
         name = p.name
-        if not p.is_file():
+        if not p.is_file() and not p.is_symlink():
             continue
-        if name.startswith("access.log"):
+        if not p.exists():
+            continue
+        if _is_access_log(name):
             access.append(p)
-        elif name.startswith("error.log"):
+        elif _is_error_log(name):
             error.append(p)
     return access, error
 
 
 def sort_logs_newest_first(paths: List[Path]) -> List[Path]:
-    """access.log, access.log.1, access.log.2.gz ..."""
+    """access.log, access.log.1, access.log.2.gz ... (и access_log варијанти)"""
+
+    current_names = {
+        "access.log",
+        "error.log",
+        "access_log",
+        "error_log",
+        "nginx-access.log",
+        "nginx-error.log",
+        "nginx_access.log",
+        "nginx_error.log",
+    }
 
     def key(p: Path) -> tuple:
         name = p.name
-        if name in ("access.log", "error.log"):
+        if name in current_names:
             return (0, 0)
-        # access.log.1 / error.log.1
         m = re.search(r"\.(\d+)(?:\.gz)?$", name)
         if m:
             return (1, int(m.group(1)))
@@ -775,7 +835,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    log_dir = Path(args.dir)
+
+    try:
+        log_dir = resolve_log_dir(args.dir)
+    except FileNotFoundError as e:
+        print(f"[!] {e}", file=sys.stderr)
+        return 1
 
     try:
         access_files, error_files = discover_logs(log_dir)
@@ -787,8 +852,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     error_files = sort_logs_newest_first(error_files)
 
     if args.current_only:
-        access_files = [p for p in access_files if p.name == "access.log"]
-        error_files = [p for p in error_files if p.name == "error.log"]
+        current_access = {
+            "access.log",
+            "access_log",
+            "nginx-access.log",
+            "nginx_access.log",
+        }
+        current_error = {
+            "error.log",
+            "error_log",
+            "nginx-error.log",
+            "nginx_error.log",
+        }
+        access_files = [p for p in access_files if p.name in current_access]
+        error_files = [p for p in error_files if p.name in current_error]
     if args.max_files:
         access_files = access_files[: args.max_files]
         error_files = error_files[: args.max_files]
@@ -797,6 +874,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.quiet:
             print(msg, flush=True)
 
+    if str(log_dir) != args.dir:
+        log(f"Лог директориум: {log_dir}  (автоматски најден, зададено беше {args.dir})")
+    else:
+        log(f"Лог директориум: {log_dir}")
     log("Датотеки што ќе се обработат:")
     if not args.error_only:
         for p in access_files:

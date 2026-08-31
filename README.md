@@ -46,15 +46,41 @@ $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$
 ├── nginx-report.service     # systemd oneshot
 ├── nginx-report.timer       # секој ден во 00:20
 ├── nginx-logs.zsh           # zsh помошник: logs, logs f, logs report
+├── install.sh               # преносна инсталација за повеќе дистрибуции
 ├── LICENSE
 └── README.md
 ```
 
+## Поддржани дистрибуции
+
+Скриптата е чист Python 3 (стандардна библиотека) и работи насекаде каде има `python3`:
+
+- Debian, Ubuntu, Linux Mint
+- Fedora, RHEL, CentOS, Rocky, AlmaLinux, Amazon Linux
+- Arch Linux, Manjaro
+- openSUSE Leap / Tumbleweed
+- Alpine
+- Nginx/OpenResty инсталиран од source (`/usr/local/nginx/logs`, `/opt/nginx/logs`)
+
+Ако `access.log` не е во `/var/log/nginx`, анализаторот сам ги пробува вообичаените патеки. Инаку: `--dir /патека`.
+
+Ги препознава и имињата `access.log`, `access_log`, `nginx-access.log` (исто за error).
+
 ## Инсталација
 
+Препорачано (сите дистрибуции):
+
 ```bash
-sudo cp nginx_log_analyzer.py /usr/local/bin/nginx_log_analyzer.py
-sudo cp nginx-daily-report.sh /usr/local/bin/nginx-daily-report.sh
+sudo ./install.sh
+```
+
+`install.sh` ги копира датотеките во `/usr/local/bin`, ги става systemd unit-ите ако постојат и кажува која група да ја користиш за дозволи.
+
+Рачно:
+
+```bash
+sudo cp nginx_log_analyzer.py nginx-daily-report.sh /usr/local/bin/
+sudo cp nginx-logs.zsh /usr/local/bin/
 sudo chmod 755 /usr/local/bin/nginx_log_analyzer.py /usr/local/bin/nginx-daily-report.sh
 sudo mkdir -p /var/log/nginx-reports
 ```
@@ -64,6 +90,219 @@ sudo mkdir -p /var/log/nginx-reports
 ```bash
 sudo python3 /usr/local/bin/nginx_log_analyzer.py --current-only
 ```
+
+## Примери за конфигурација
+
+### 1. Nginx — препорачан `combined` формат
+
+Анализаторот очекува стандарден `combined` ред. Во `/etc/nginx/nginx.conf` (во блокот `http`):
+
+```nginx
+http {
+    log_format combined '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent"';
+
+    access_log /var/log/nginx/access.log combined;
+    error_log  /var/log/nginx/error.log warn;
+
+    # ...
+}
+```
+
+По промена:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 2. Посебен лог по страна / апликација
+
+Ако имаш повеќе сајтови, секој `server` може да пишува во своја датотека. Анализаторот чита сè што почнува со `access.log` / `error.log` во истиот директориум, **или** пушти го со `-d` на конкретна папка.
+
+```nginx
+# /etc/nginx/sites-available/app.example.com
+server {
+    listen 443 ssl;
+    server_name app.example.com;
+
+    access_log /var/log/nginx/access.log combined;
+    error_log  /var/log/nginx/error.log warn;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Засебни логови по апликација:
+
+```nginx
+server {
+    server_name api.example.com;
+    access_log /var/log/nginx/api.access.log combined;
+    error_log  /var/log/nginx/api.error.log warn;
+    # ...
+}
+```
+
+Засебните имиња (`api.access.log`) **не** се детектираат автоматски. Или држи го стандардното `access.log` / `error.log`, или копирај/симлинкувај ги во посебен директориум и повикај:
+
+```bash
+sudo python3 nginx_log_analyzer.py -d /var/log/nginx-api
+```
+
+Покорисен пристап: остави ги сите сајтови во истиот `access.log` — `host` / `server` од error логот и патеките ќе ги разделат апликациите во извештајот.
+
+### 3. Побогат access формат (дополнителни полиња на крај)
+
+Парсерот го игнорира она што доаѓа **после** combined полињата. Безбедно е да додадеш `$request_time`, `$upstream_addr` и сл. на крај:
+
+```nginx
+log_format combined_ext '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" '
+                        'rt=$request_time ua=$upstream_addr';
+
+access_log /var/log/nginx/access.log combined_ext;
+```
+
+Ако го смениш редоследот на полињата (на пр. JSON лог), стандардниот парсер нема да ги препознае редовите.
+
+### 4. `logrotate` за Nginx
+
+Пример `/etc/logrotate.d/nginx`:
+
+```
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    # Fedora/RHEL/Arch/SUSE:  create 0640 nginx nginx
+    # Arch (http user):       create 0640 http http
+    sharedscripts
+    postrotate
+        if [ -f /run/nginx.pid ]; then
+            kill -USR1 "$(cat /run/nginx.pid)"
+        fi
+        # опционално: извештај веднаш после ротација
+        # /usr/local/bin/nginx-daily-report.sh
+    endscript
+}
+```
+
+`delaycompress` го остава `access.log.1` некомпресиран еден ден — анализаторот ги чита и `.1` и `.gz`.
+
+### 5. Променливи за `nginx-daily-report.sh`
+
+| Променлива | Стандардно | Опис |
+|---|---|---|
+| `ANALYZER` | `/usr/local/bin/nginx_log_analyzer.py` | Патека до Python скриптата |
+| `LOG_DIR` | `/var/log/nginx` | Директориум со логови |
+| `REPORT_DIR` | `/var/log/nginx-reports` | Каде се чуваат извештаите |
+| `KEEP_DAYS` | `30` | По колку дена се бришат старите извештаи |
+| `MAIL_TO` | празно | Е-пошта; празно = без праќање |
+| `TOP_IPS` | `40` | Колку IP во извештајот |
+| `PATHS_PER_IP` | `25` | Колку патеки по IP |
+
+Пример рачно:
+
+```bash
+sudo env \
+  LOG_DIR=/var/log/nginx \
+  REPORT_DIR=/var/log/nginx-reports \
+  KEEP_DAYS=14 \
+  TOP_IPS=50 \
+  PATHS_PER_IP=30 \
+  MAIL_TO=admin@example.com \
+  /usr/local/bin/nginx-daily-report.sh
+```
+
+Пример во `crontab`:
+
+```cron
+MAIL_TO=admin@example.com
+TOP_IPS=50
+KEEP_DAYS=14
+20 0 * * * /usr/local/bin/nginx-daily-report.sh >/var/log/nginx-reports/cron.log 2>&1
+```
+
+### 6. systemd drop-in (без менување на unit датотеката)
+
+```bash
+sudo systemctl edit nginx-report.service
+```
+
+```ini
+[Service]
+Environment=KEEP_DAYS=14
+Environment=TOP_IPS=50
+Environment=PATHS_PER_IP=30
+Environment=MAIL_TO=admin@example.com
+Environment=REPORT_DIR=/var/log/nginx-reports
+```
+
+Потоа:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start nginx-report.service
+```
+
+### 7. zsh / `.zshrc`
+
+```zsh
+# патеки ако не ги инсталираш во /usr/local/bin
+export NGINX_ANALYZER="$HOME/src/nginx-log-analyzer/nginx_log_analyzer.py"
+export NGINX_LOG_DIR="/var/log/nginx"
+export NGINX_TOP_IPS=20
+export PAGER="less"
+
+source /usr/local/bin/nginx-logs.zsh
+# или: source "$HOME/src/nginx-log-analyzer/nginx-logs.zsh"
+```
+
+### 8. Преглед на HTML извештајот преку Nginx (basic auth)
+
+```bash
+# Debian/Ubuntu:     sudo apt-get install -y apache2-utils
+# Fedora/RHEL:       sudo dnf install -y httpd-tools
+# Arch:              sudo pacman -S --needed apache
+# openSUSE:          sudo zypper install apache2-utils
+# Alpine:            sudo apk add apache2-utils
+
+sudo htpasswd -c /etc/nginx/.htpasswd-reports admin
+sudo chmod 640 /etc/nginx/.htpasswd-reports
+# Nginx group: www-data (Debian), nginx (RHEL/SUSE), http (Arch)
+sudo chown root:www-data /etc/nginx/.htpasswd-reports
+```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name reports.example.com;
+
+    root /var/log/nginx-reports;
+    autoindex on;
+
+    auth_basic "Nginx reports";
+    auth_basic_user_file /etc/nginx/.htpasswd-reports;
+
+    location / {
+        default_type text/html;
+    }
+}
+```
+
+Отвори `https://reports.example.com/latest.html`. Не го прави овој location јавен без лозинка — извештаите содржат IP адреси и патеки.
 
 ## Употреба
 
@@ -231,16 +470,33 @@ endscript
 
 ## Дозволи
 
-Типичен Debian/Ubuntu распоред:
+Логовите обично се `640` и не се читливи за обичен корисник. Сопственикот зависи од дистрибуцијата:
 
-```
--rw-r-----  www-data adm  /var/log/nginx/access.log
-```
+| Дистрибуција | Корисник | Група | Патека |
+|---|---|---|---|
+| Debian, Ubuntu | `www-data` | `adm` | `/var/log/nginx` |
+| Fedora, RHEL, Rocky, Alma | `nginx` | `nginx` | `/var/log/nginx` |
+| Arch | `http` или `nginx` | `http` / `nginx` | `/var/log/nginx` |
+| openSUSE | `nginx` | `nginx` | `/var/log/nginx` |
+| Alpine | `nginx` | `nginx` | `/var/log/nginx` |
+| Source / OpenResty | зависи | зависи | `/usr/local/nginx/logs` и сл. |
 
-Пушти го анализаторот како root, или додај се во групата `adm`:
+Најбезбедно: пушти го анализаторот со `sudo` / root.
+
+Или додај се во групата што ги чита логовите (провери со `ls -l /var/log/nginx`):
 
 ```bash
+# Debian/Ubuntu
 sudo usermod -aG adm "$USER"
+
+# Fedora / RHEL фамилија / SUSE / многу други
+sudo usermod -aG nginx "$USER"
+
+# Arch
+sudo usermod -aG http "$USER"
+
+# Alpine
+sudo adduser "$USER" nginx
 ```
 
 Потоа одјави се и најави се повторно.
@@ -294,15 +550,41 @@ $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$
 ├── nginx-report.service     # systemd oneshot
 ├── nginx-report.timer       # run every day at 00:20
 ├── nginx-logs.zsh           # zsh helper: logs, logs f, logs report
+├── install.sh               # portable installer for multiple distros
 ├── LICENSE
 └── README.md
 ```
 
+## Supported distributions
+
+The analyzer is plain Python 3 (stdlib only) and runs anywhere `python3` exists:
+
+- Debian, Ubuntu, Linux Mint
+- Fedora, RHEL, CentOS, Rocky, AlmaLinux, Amazon Linux
+- Arch Linux, Manjaro
+- openSUSE Leap / Tumbleweed
+- Alpine
+- Nginx/OpenResty built from source (`/usr/local/nginx/logs`, `/opt/nginx/logs`)
+
+If `access.log` is not in `/var/log/nginx`, the analyzer tries the usual locations. Otherwise pass `--dir /path`.
+
+It also recognizes `access.log`, `access_log`, and `nginx-access.log` (same for error logs).
+
 ## Install
 
+Recommended (all distros):
+
 ```bash
-sudo cp nginx_log_analyzer.py /usr/local/bin/nginx_log_analyzer.py
-sudo cp nginx-daily-report.sh /usr/local/bin/nginx-daily-report.sh
+sudo ./install.sh
+```
+
+`install.sh` copies files to `/usr/local/bin`, installs the systemd units when systemd is present, and prints the correct log-file group for your OS.
+
+Manual:
+
+```bash
+sudo cp nginx_log_analyzer.py nginx-daily-report.sh /usr/local/bin/
+sudo cp nginx-logs.zsh /usr/local/bin/
 sudo chmod 755 /usr/local/bin/nginx_log_analyzer.py /usr/local/bin/nginx-daily-report.sh
 sudo mkdir -p /var/log/nginx-reports
 ```
@@ -312,6 +594,219 @@ Quick test:
 ```bash
 sudo python3 /usr/local/bin/nginx_log_analyzer.py --current-only
 ```
+
+## Configuration examples
+
+### 1. Nginx — recommended `combined` format
+
+The analyzer expects a standard `combined` line. In `/etc/nginx/nginx.conf` (inside the `http` block):
+
+```nginx
+http {
+    log_format combined '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent"';
+
+    access_log /var/log/nginx/access.log combined;
+    error_log  /var/log/nginx/error.log warn;
+
+    # ...
+}
+```
+
+After changing the config:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 2. Separate log per site / app
+
+Each `server` block can write its own files. The analyzer picks up anything named `access.log*` / `error.log*` in the same directory, **or** you can point `-d` at a dedicated folder.
+
+```nginx
+# /etc/nginx/sites-available/app.example.com
+server {
+    listen 443 ssl;
+    server_name app.example.com;
+
+    access_log /var/log/nginx/access.log combined;
+    error_log  /var/log/nginx/error.log warn;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Per-app files:
+
+```nginx
+server {
+    server_name api.example.com;
+    access_log /var/log/nginx/api.access.log combined;
+    error_log  /var/log/nginx/api.error.log warn;
+    # ...
+}
+```
+
+Custom names such as `api.access.log` are **not** auto-discovered. Keep the default `access.log` / `error.log` names, or put copies/symlinks in a dedicated directory:
+
+```bash
+sudo python3 nginx_log_analyzer.py -d /var/log/nginx-api
+```
+
+Usually it is better to keep every site in the shared `access.log` — error-log `host` / `server` fields and request paths already split apps in the report.
+
+### 3. Richer access format (extra fields at the end)
+
+The parser ignores anything **after** the combined fields. You can append `$request_time`, `$upstream_addr`, and similar:
+
+```nginx
+log_format combined_ext '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" '
+                        'rt=$request_time ua=$upstream_addr';
+
+access_log /var/log/nginx/access.log combined_ext;
+```
+
+If you reorder fields (for example JSON logging), the default parser will not recognize the lines.
+
+### 4. Nginx `logrotate`
+
+Example `/etc/logrotate.d/nginx`:
+
+```
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    # Fedora/RHEL/Arch/SUSE:  create 0640 nginx nginx
+    # Arch (http user):       create 0640 http http
+    sharedscripts
+    postrotate
+        if [ -f /run/nginx.pid ]; then
+            kill -USR1 "$(cat /run/nginx.pid)"
+        fi
+        # optional: generate a report right after rotation
+        # /usr/local/bin/nginx-daily-report.sh
+    endscript
+}
+```
+
+`delaycompress` leaves `access.log.1` uncompressed for one day — the analyzer reads both `.1` and `.gz`.
+
+### 5. Environment variables for `nginx-daily-report.sh`
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANALYZER` | `/usr/local/bin/nginx_log_analyzer.py` | Path to the Python script |
+| `LOG_DIR` | `/var/log/nginx` | Log directory |
+| `REPORT_DIR` | `/var/log/nginx-reports` | Where reports are stored |
+| `KEEP_DAYS` | `30` | Delete reports older than this |
+| `MAIL_TO` | empty | Email recipient; empty = no mail |
+| `TOP_IPS` | `40` | How many IPs in the report |
+| `PATHS_PER_IP` | `25` | How many paths per IP |
+
+Manual run:
+
+```bash
+sudo env \
+  LOG_DIR=/var/log/nginx \
+  REPORT_DIR=/var/log/nginx-reports \
+  KEEP_DAYS=14 \
+  TOP_IPS=50 \
+  PATHS_PER_IP=30 \
+  MAIL_TO=admin@example.com \
+  /usr/local/bin/nginx-daily-report.sh
+```
+
+`crontab` example:
+
+```cron
+MAIL_TO=admin@example.com
+TOP_IPS=50
+KEEP_DAYS=14
+20 0 * * * /usr/local/bin/nginx-daily-report.sh >/var/log/nginx-reports/cron.log 2>&1
+```
+
+### 6. systemd drop-in (leave the unit file untouched)
+
+```bash
+sudo systemctl edit nginx-report.service
+```
+
+```ini
+[Service]
+Environment=KEEP_DAYS=14
+Environment=TOP_IPS=50
+Environment=PATHS_PER_IP=30
+Environment=MAIL_TO=admin@example.com
+Environment=REPORT_DIR=/var/log/nginx-reports
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start nginx-report.service
+```
+
+### 7. zsh / `.zshrc`
+
+```zsh
+# paths if you do not install into /usr/local/bin
+export NGINX_ANALYZER="$HOME/src/nginx-log-analyzer/nginx_log_analyzer.py"
+export NGINX_LOG_DIR="/var/log/nginx"
+export NGINX_TOP_IPS=20
+export PAGER="less"
+
+source /usr/local/bin/nginx-logs.zsh
+# or: source "$HOME/src/nginx-log-analyzer/nginx-logs.zsh"
+```
+
+### 8. Serve the HTML report through Nginx (basic auth)
+
+```bash
+# Debian/Ubuntu:     sudo apt-get install -y apache2-utils
+# Fedora/RHEL:       sudo dnf install -y httpd-tools
+# Arch:              sudo pacman -S --needed apache
+# openSUSE:          sudo zypper install apache2-utils
+# Alpine:            sudo apk add apache2-utils
+
+sudo htpasswd -c /etc/nginx/.htpasswd-reports admin
+sudo chmod 640 /etc/nginx/.htpasswd-reports
+# Nginx group: www-data (Debian), nginx (RHEL/SUSE), http (Arch)
+sudo chown root:www-data /etc/nginx/.htpasswd-reports
+```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name reports.example.com;
+
+    root /var/log/nginx-reports;
+    autoindex on;
+
+    auth_basic "Nginx reports";
+    auth_basic_user_file /etc/nginx/.htpasswd-reports;
+
+    location / {
+        default_type text/html;
+    }
+}
+```
+
+Open `https://reports.example.com/latest.html`. Do not expose this location without a password — reports contain client IPs and request paths.
 
 ## Usage
 
@@ -479,16 +974,33 @@ Empty `error.log` is normal right after rotation; older `error.log.1` and `error
 
 ## Permissions
 
-Typical Debian/Ubuntu layout:
+Log files are usually mode `640` and not world-readable. The owner depends on the distro:
 
-```
--rw-r-----  www-data adm  /var/log/nginx/access.log
-```
+| Distro | User | Group | Path |
+|---|---|---|---|
+| Debian, Ubuntu | `www-data` | `adm` | `/var/log/nginx` |
+| Fedora, RHEL, Rocky, Alma | `nginx` | `nginx` | `/var/log/nginx` |
+| Arch | `http` or `nginx` | `http` / `nginx` | `/var/log/nginx` |
+| openSUSE | `nginx` | `nginx` | `/var/log/nginx` |
+| Alpine | `nginx` | `nginx` | `/var/log/nginx` |
+| Source / OpenResty | varies | varies | `/usr/local/nginx/logs`, etc. |
 
-Run the analyzer as root, or add your user to `adm`:
+Safest option: run the analyzer with `sudo` / as root.
+
+Or add yourself to the group that can read the logs (check with `ls -l /var/log/nginx`):
 
 ```bash
+# Debian/Ubuntu
 sudo usermod -aG adm "$USER"
+
+# Fedora / RHEL family / SUSE / many others
+sudo usermod -aG nginx "$USER"
+
+# Arch
+sudo usermod -aG http "$USER"
+
+# Alpine
+sudo adduser "$USER" nginx
 ```
 
 Then log out and back in.

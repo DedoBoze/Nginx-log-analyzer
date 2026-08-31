@@ -3,8 +3,18 @@
 set -euo pipefail
 
 ANALYZER="${ANALYZER:-/usr/local/bin/nginx_log_analyzer.py}"
-LOG_DIR="${LOG_DIR:-/var/log/nginx}"
 REPORT_DIR="${REPORT_DIR:-/var/log/nginx-reports}"
+
+if [[ -z "${LOG_DIR:-}" ]]; then
+  for d in /var/log/nginx /usr/local/nginx/logs /opt/nginx/logs \
+           /usr/local/openresty/nginx/logs /var/log/openresty; do
+    if [[ -d "$d" ]]; then
+      LOG_DIR="$d"
+      break
+    fi
+  done
+fi
+LOG_DIR="${LOG_DIR:-/var/log/nginx}"
 KEEP_DAYS="${KEEP_DAYS:-30}"
 MAIL_TO="${MAIL_TO:-}"          # пр. admin@example.com  (празно = без е-пошта)
 TOP_IPS="${TOP_IPS:-40}"
